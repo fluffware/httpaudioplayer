@@ -1,0 +1,8 @@
+This project was started due to lack of reliable audio playback in Siemens WinCC Runtime.
+The program normaly runs on the same machine that runs the runtime. It communicates with the runtime using SIMATIC HMI HTTP protocol. Whenever one of the defined bool variables are toggled at plays an audio clip.
+Which clip to play when a bit is toggled is configured using a file.
+An example file can be found in the test directory.
+
+The program depends on AudioPort for playback so it needs to be installed.
+
+The executable takes one optional commandline argument and that's the name of configuration file. If none is given a default filename is used.
