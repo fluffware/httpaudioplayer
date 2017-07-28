@@ -252,6 +252,16 @@ impl HttpVarOps for AudioOps
     }
 }
 
+const SAMPLE_MAX:f64 = std::i16::MAX as f64;
+const SAMPLE_MIN:f64 = std::i16::MIN as f64;
+
+fn adjust_volume(volume: f64, buffer: &mut [i16])
+{
+    for s in buffer {
+        *s = ((*s as f64) * volume).max(SAMPLE_MIN).min(SAMPLE_MAX).round() as i16;
+    }
+}
+
 struct Config
 {
     cmd: String,
@@ -301,6 +311,7 @@ fn main() {
             Ok(c) => c
         };
 
+    let mut volume = 1.0f64;
     let mut sample_rate:u32 = 44_100;
     let mut channels:u8 = 2;
     let mut bind_addr = "0.0.0.0:8087".parse().unwrap();
@@ -376,13 +387,17 @@ fn main() {
                 let path = Path::new(&line.args[1]);
                 match hound::WavReader::open(path) {
                     Ok(mut reader) => {
-                        let sbuffer = reader.samples::<i16>()
+                        let mut sbuffer = reader.samples::<i16>()
                             .map(|r| {r.unwrap()}).collect::<Vec<i16>>();
+                        if volume != 1.0 {
+                            adjust_volume(volume, &mut sbuffer[..]);
+                        }
                         player.add_clip(slot, sbuffer);
-                        print_info!("Loaded clip {} from {} ({} samples/s, {} channels)",
+                        print_info!("Loaded clip {} from {} ({} samples/s, {} channels) volume {:.2}",
                                     slot, path.to_str().unwrap_or("?"), 
                                     reader.spec().sample_rate, 
-                                    reader.spec().channels);
+                                    reader.spec().channels,
+                                    volume);
 
                         state.insert(slot.to_string(), false);
                         
@@ -395,7 +410,21 @@ fn main() {
                 }
     
             },
-            
+            "volume" => {
+                if line.args.len() < 1 {
+                    print_err!("Too few arguments for volume");
+                    return
+                }
+                volume = match f64::from_str(&line.args[0]) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        print_err!("Failed to parse volume: {}",
+                                   e.description());
+                        return
+                    }
+                }
+                
+            },
             "rate" | "bind" | "channels" => {}, // Handled earlier
             c => {print_err!("Ignored configuration command '{}'", c);}
         }
