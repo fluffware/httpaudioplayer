@@ -138,7 +138,6 @@ fn parse_request(ops: &mut HttpVarOps, chunk: Chunk) -> hyper::Response
     let bytes: &[u8] = chunk.as_ref();
     match parser::request(bytes) {
         nom::IResult::Done(_,res) =>{
-            //println!("Parsing done");
             match res {
                 parser::Request::Read(vars) => {
                     read_vars(ops, &vars)
@@ -233,7 +232,6 @@ impl HttpVarOps for AudioOps
                 match self.state.get(&var) {
                     Some(&old) => {
                         if old != value {
-                            println!("Changed: {}", var);
                             match self.player.play_clip(&var) {
                                 Ok(_) => {},
                                 Err(e) => {
@@ -363,7 +361,10 @@ fn main() {
             }
     };
     print_info!("Using {} samples/s, {} channels for playback", 
-               sample_rate, channels);
+                sample_rate, channels);
+
+    let mut state = BTreeMap::new();
+
     for line in conf {
         match line.cmd.as_str() {
             "clip" => {
@@ -379,7 +380,11 @@ fn main() {
                             .map(|r| {r.unwrap()}).collect::<Vec<i16>>();
                         player.add_clip(slot, sbuffer);
                         print_info!("Loaded clip {} from {} ({} samples/s, {} channels)",
-                                    slot, path.to_str().unwrap_or("?"), reader.spec().sample_rate, reader.spec().channels);
+                                    slot, path.to_str().unwrap_or("?"), 
+                                    reader.spec().sample_rate, 
+                                    reader.spec().channels);
+
+                        state.insert(slot.to_string(), false);
                         
                     },
                     Err(err) => {
@@ -391,23 +396,12 @@ fn main() {
     
             },
             
-            "rate" | "bind" => {}, // Handled earlier
+            "rate" | "bind" | "channels" => {}, // Handled earlier
             c => {print_err!("Ignored configuration command '{}'", c);}
         }
-        //println!("Cmd: {}", line.cmd);
     }
 
-    let ops = Arc::new(Mutex::new(AudioOps{state: BTreeMap::new(), player: player}));
-    {
-        let tree = &mut ops.lock().unwrap().state;
-        tree.insert("Alarm".to_string(), false);
-        tree.insert("Info".to_string(), true);
-        tree.insert("Inc".to_string(), true);
-        tree.insert("Dec".to_string(), false);
-        tree.insert("Accept".to_string(), true);
-        tree.insert("Exe".to_string(), false);
-    }
-
+    let ops = Arc::new(Mutex::new(AudioOps{state: state, player: player}));
     let server = Http::new().bind(&bind_addr, move || Ok(AudioHandler::new(ops.clone()))).unwrap();
     print_info!("Listening on http://{}", server.local_addr().unwrap());
     server.run().unwrap();
