@@ -3,6 +3,7 @@ The program normaly runs on the same machine that runs the runtime. It communica
 Which clip to play when a bit is toggled is configured using a file.
 An example file can be found in the test directory.
 
-The program depends on AudioPort for playback so it needs to be installed.
+The program depends on AudioPort for playback, so it needs to be installed.
 
 The executable takes one optional commandline argument and that's the name of configuration file. If none is given a default filename is used.
+

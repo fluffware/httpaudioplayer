@@ -1,33 +1,33 @@
+
+
 extern crate hyper;
 extern crate futures;
-extern crate mime;
 extern crate portaudio;
 extern crate hound;
+extern crate tokio;
+extern crate triggered;
 
 use std::fs::File;
 use std::path::Path;
 use std::ffi::OsStr;
 use std::io::Write;
-use std::error::Error;
 use std::io::BufReader;
 use std::io::BufRead;
-use std::net::AddrParseError;
 use std::env;
+use core::convert::Infallible;
 
-use futures::future::FutureResult;
-
-use hyper::header::{ContentLength, ContentType};
-use hyper::server::{Http, Service, Request, Response};
-use hyper::{Method, StatusCode,Chunk};
-use mime::Mime;
+use hyper::header::{CONTENT_TYPE};
+use hyper::{StatusCode, Method,Response, Request,Body,server::Server};
+use hyper::body::Bytes;
+use hyper::service::{make_service_fn, service_fn};
 use std::str::FromStr;
-use futures::Stream;
-use futures::Future;
-use futures::future::Either;
-use futures::future::BoxFuture;
 use std::collections::btree_map::BTreeMap;
+use triggered::Trigger;
 
 use std::sync::{Arc,Mutex};
+use futures::future::FutureExt;
+use hyper::header;
+use std::panic;
 
 #[macro_use]
 extern crate nom;
@@ -63,7 +63,7 @@ mod parser {
         Write((&'a [u8],&'a [u8]))
     }
     named!(quoted, delimited!(char!('\"'), take_until!("\""), char!('\"')));
-    named!(quoted_list <Vec<&[u8]>>, separated_nonempty_list_complete!(char!(','),quoted));
+    named!(quoted_list <Vec<&[u8]>>, separated_list1!(char!(','),quoted));
     named!(read <Vec<&[u8]>>, terminated!(preceded!(tag!("ReadVarNames="),quoted_list),eof!()));
     named!(write <(&[u8], &[u8])>, separated_pair!(preceded!(tag!("WriteVarName="),quoted),
                                   char!('&'),
@@ -72,19 +72,12 @@ mod parser {
                                        | map!(write, |v| Request::Write(v))));
 }
 
-type Ops = Arc<Mutex<HttpVarOps>>;
-
-struct AudioHandler
-{
-    ops: Ops
-}
-
-fn request_error(msg: &str) ->hyper::Response {
-    return Response::new()
-        .with_status(StatusCode::BadRequest)
-        .with_header(ContentType::plaintext())
-        .with_header(ContentLength(msg.len() as u64))
-        .with_body(msg.to_string())
+fn request_error<M: Into<Body>>(msg: M) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header(CONTENT_TYPE,"text/html")
+        .body(msg.into())
+	.unwrap()
 }
 
 pub trait HttpVarOps : Send {
@@ -92,7 +85,7 @@ pub trait HttpVarOps : Send {
     fn read_var(&mut self, var: &str) -> Option<String>;
 }
 
-fn read_vars(ops:  &mut HttpVarOps, vars: &Vec<&[u8]>) -> hyper::Response
+fn read_vars(ops:  &mut dyn HttpVarOps, vars: &[&[u8]]) -> Response<Body>
 {
     let vars: Vec<String> = 
         match vars.iter().map(|s| String::from_utf8(s.to_vec())).collect() {
@@ -107,15 +100,15 @@ fn read_vars(ops:  &mut HttpVarOps, vars: &Vec<&[u8]>) -> hyper::Response
                 None => "80000105 ###\r\n".to_string()
             };
     }
-    Response::new()
-        .with_header(ContentType(Mime::from_str("text/fwddata").unwrap()))
-        .with_header(ContentLength(body.len() as u64))
-        .with_body(body) 
+    Response::builder()
+        .header(CONTENT_TYPE, "text/fwddata")
+        .body(Body::from(body))
+	.unwrap()
 }
 
-fn write_var(ops:  &mut HttpVarOps, var: &[u8], value: &[u8]) -> hyper::Response
+fn write_var(ops:  &mut dyn HttpVarOps, var: &[u8], value: &[u8]) -> Response<Body>
 {
-    let value = &String::from_utf8(value.to_vec()).unwrap_or("?".to_string());
+    let value = &String::from_utf8(value.to_vec()).unwrap_or_else(|_| "?".to_string());
     let var = match String::from_utf8(var.to_vec()) {
             Ok(v) => v,
             Err(_) => return request_error("Invalid UTF-8 in write variable name")
@@ -127,17 +120,16 @@ fn write_var(ops:  &mut HttpVarOps, var: &[u8], value: &[u8]) -> hyper::Response
         } else {
             "80000105\r\n"
         };
-    Response::new()
-        .with_header(ContentType(Mime::from_str("text/fwddata").unwrap()))
-        .with_header(ContentLength(body.len() as u64))
-        .with_body(body) 
+    Response::builder()
+        .header(CONTENT_TYPE,"text/fwddata")
+        .body(Body::from(body))
+	.unwrap()
 }
 
-fn parse_request(ops: &mut HttpVarOps, chunk: Chunk) -> hyper::Response
+fn parse_request(ops: &mut dyn HttpVarOps, bytes: Bytes) -> Response<Body>
 {
-    let bytes: &[u8] = chunk.as_ref();
-    match parser::request(bytes) {
-        nom::IResult::Done(_,res) =>{
+    match parser::request(&bytes) {
+        nom::IResult::Ok((_,res)) =>{
             match res {
                 parser::Request::Read(vars) => {
                     read_vars(ops, &vars)
@@ -147,67 +139,72 @@ fn parse_request(ops: &mut HttpVarOps, chunk: Chunk) -> hyper::Response
                 }
             }
         },
-        nom::IResult::Error(err) => {
-            request_error(&format!("Failed to parse request {}",
-                                  err.description()))
-        },
-
-        nom::IResult::Incomplete(_) => {
-            request_error("Request to short")
+        nom::IResult::Err(err) => {
+            request_error(format!("Failed to parse request {}", err))
         }
         
     }
         
   
 }
-    
+   
 
-impl AudioHandler {
-    
-    fn new(ops: Ops) -> AudioHandler
-    {
-        AudioHandler{ops: ops}
-    }
 
-    fn handle_post(&self, req: Request) -> BoxFuture<hyper::Response, hyper::Error>
-    {
-        let body = req.body().concat2();
-        let ops_arc = self.ops.clone();
-        
-        body.map(move |chunk| {
-            let mut ops = ops_arc.lock().unwrap();
-            parse_request(&mut *ops, chunk)
-        }).boxed()
-    }
-}
 
-impl Service for AudioHandler
+async fn handle_post(ops_arc: Arc<Mutex<dyn HttpVarOps>>, mut req: Request<Body>) -> Response<Body>
 {
-    type Request = Request;
-    type Response = Response;
-    type Error = hyper::Error;
-    type Future = Either<FutureResult<Self::Response, Self::Error>,
-                         BoxFuture<Self::Response, Self::Error>
-                         >;
+    let body = req.body_mut();
+    let bytes = match hyper::body::to_bytes(body).await {
+	Ok(b) => b,
+	Err(e) => return request_error(
+	    format!("Failed to read POST data: {}",e))
+    };
+    let mut ops = ops_arc.lock().unwrap();    
+    parse_request(&mut *ops,bytes)
+}
 
-    fn call(&self, req: Request) -> Self::Future {
-         match (req.method(), req.path()) {
-            (&Method::Get, "/") => {
-                Either::A(futures::future::ok(
-                    Response::new().with_body("This server only accepts POST data at /wwwSiemens conforming to the Simatic HMI HTTP protocol.")))
-            },
-             (&Method::Post, "/wwwSiemens") => {
-                 
-                 Either::B(self.handle_post(req))
-             },
-            _ => {
-                Either::A(futures::future::ok(
-                    Response::new().with_status(StatusCode::NotFound)))
-            },
+
+
+
+async fn handle_req(ops: Arc<Mutex<dyn HttpVarOps>>, req: Request<Body>,
+		    shutdown: Trigger) ->Response<Body> {
+    let fut = async {
+	let method = req.method();
+	let path = req.uri().path();
+        match (method, path) {
+	    (&Method::GET, "/") => {
+                Response::builder()
+		    .status(StatusCode::OK)
+		    .body(Body::from("This server only accepts POST data at /wwwSiemens conforming to the Simatic HMI HTTP protocol."))
+		    .unwrap()
+	    },
+	    (&Method::POST, "/wwwSiemens") => {
+                handle_post(ops, req).await
+		},
+	    _ => {
+                Response::builder()
+		    .status(StatusCode::NOT_FOUND)
+		    .body(Body::empty())
+		    .unwrap()
+	    },
         }
-
+    };
+    let res = panic::AssertUnwindSafe(fut).catch_unwind().await;
+    match res {
+	Err(_) => {
+	    println!("Request handler paniced, shuting down.");
+	    shutdown.trigger();
+	    Response::builder()
+		.status(StatusCode::INTERNAL_SERVER_ERROR)
+		.header(header::CONTENT_TYPE,"text/html")
+		.body(Body::from("Error in request handler"))
+		.unwrap()
+	},
+	Ok(r) => r
     }
 }
+			
+
 
 struct AudioOps {
     state: BTreeMap<String, bool>,
@@ -236,7 +233,13 @@ impl HttpVarOps for AudioOps
                                 Ok(_) => {},
                                 Err(e) => {
                                     print_err!("Failed to play clip {}: {}",
-                                             var, e.description());
+                                               var,e);
+				    match self.player.restart() {
+					Err(e) => {
+					    print_err!("Failed to restart audio: {}", e);
+					},
+					Ok(()) => {}
+				    }
                                 }
                             }
                                 
@@ -277,7 +280,7 @@ fn read_config(path: &Path) -> std::io::Result<Vec<Config>>
         if let Ok(line) = line_res {
             let mut tokens = split_quoted(&line);
             if let Some(cmd) = tokens.next() {
-                if cmd.starts_with("#") {
+                if cmd.starts_with('#') {
                     // Comment, ignore
                 } else {
                     let conf_line = 
@@ -291,9 +294,10 @@ fn read_config(path: &Path) -> std::io::Result<Vec<Config>>
     Ok(conf)
 }
 
-const DEFAULT_CONFIG_FILE: &'static str = "httpaudioplayer.conf";
+const DEFAULT_CONFIG_FILE: &str = "httpaudioplayer.conf";
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let args = env::args_os();
     let mut args = args.skip(1);
     let conf_path_str = 
@@ -305,7 +309,7 @@ fn main() {
     let conf =
         match read_config(Path::new(&conf_path_str)) {
             Err(err) => {
-                print_err!("Failed to read configuration file {:?}: {:?}", conf_path_str, err.description());
+                print_err!("Failed to read configuration file {:?}: {:?}", conf_path_str, err);
                 return
             },
             Ok(c) => c
@@ -319,7 +323,7 @@ fn main() {
     for line in &conf {
         match line.cmd.as_str() {
             "rate" => { 
-                if line.args.len() < 1 {
+                if line.args.is_empty() {
                     print_err!("Too few arguments for rate");
                     return
                 }
@@ -327,13 +331,13 @@ fn main() {
                     Ok(r) => r,
                     Err(e) => {
                         print_err!("Failed to parse sample rate: {}",
-                                   e.description());
+                                   e);
                         return
                     }
                 }
             },
             "channels" => {
-                if line.args.len() < 1 {
+                if line.args.is_empty() {
                     print_err!("Too few arguments for channels");
                     return
                 }
@@ -341,21 +345,20 @@ fn main() {
                     Ok(r) => r,
                     Err(e) => {
                         print_err!("Failed to parse number of channels: {}",
-                                   e.description());
+                                   e);
                         return
                     }
                 }
             },
             "bind" => {
-                if line.args.len() < 1 {
+                if line.args.is_empty() {
                     print_err!("Too few arguments for rate");
                     return
                 }
                 bind_addr = match line.args[0].parse() {
                     Ok(a) => a,
                     Err(e) => {
-                        print_err!("Couldn't parse bind address: {}", 
-                                   (e as AddrParseError).description());
+                        print_err!("Couldn't parse bind address: {}", e);
                         return
                     }
                 }
@@ -367,7 +370,7 @@ fn main() {
          Ok(s) => s,
             Err(e) => {
                 print_err!("Failed to start audio clip player: {}", 
-                           e.description());
+                           e);
                 return;
             }
     };
@@ -389,7 +392,9 @@ fn main() {
                     Ok(mut reader) => {
                         let mut sbuffer = reader.samples::<i16>()
                             .map(|r| {r.unwrap()}).collect::<Vec<i16>>();
-                        if volume != 1.0 {
+			
+			#[allow(clippy::float_cmp)]
+			if volume != 1.0 {
                             adjust_volume(volume, &mut sbuffer[..]);
                         }
                         player.add_clip(slot, sbuffer);
@@ -404,14 +409,14 @@ fn main() {
                     },
                     Err(err) => {
                         print_err!("Failed to open audio file \"{}\": {}",
-                                   &line.args[1], err.description());
+                                   &line.args[1], err);
                         return
                     }
                 }
     
             },
             "volume" => {
-                if line.args.len() < 1 {
+                if line.args.is_empty() {
                     print_err!("Too few arguments for volume");
                     return
                 }
@@ -419,7 +424,7 @@ fn main() {
                     Ok(r) => r,
                     Err(e) => {
                         print_err!("Failed to parse volume: {}",
-                                   e.description());
+                                   e);
                         return
                     }
                 }
@@ -429,9 +434,28 @@ fn main() {
             c => {print_err!("Ignored configuration command '{}'", c);}
         }
     }
-
-    let ops = Arc::new(Mutex::new(AudioOps{state: state, player: player}));
-    let server = Http::new().bind(&bind_addr, move || Ok(AudioHandler::new(ops.clone()))).unwrap();
-    print_info!("Listening on http://{}", server.local_addr().unwrap());
-    server.run().unwrap();
+    
+    let ops = Arc::new(Mutex::new(AudioOps{state, player}));
+    let (shutdown, wait_shutdown) = triggered::trigger();
+    let make_svc = make_service_fn(|_| {
+	let ops = ops.clone();
+	let shutdown = shutdown.clone();
+	async {
+	    Ok::<_, Infallible>(
+		service_fn(move |req: Request<Body>| {
+		    let ops = ops.clone();
+		    let shutdown = shutdown.clone();
+		    async move {
+			Ok::<_, Infallible>(
+			    handle_req(ops, req, shutdown).await
+			)
+		    }
+		}))
+	}
+    });
+    let server = Server::bind(&bind_addr).serve(make_svc);
+    print_info!("Listening on http://{}", server.local_addr());
+    let graceful = server.with_graceful_shutdown(wait_shutdown);
+    graceful.await.unwrap();
+    println!("Server stopped");
 }

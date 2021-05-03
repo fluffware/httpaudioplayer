@@ -25,7 +25,7 @@ impl<'a> Iterator for SplitQuoted<'a>
         }
         let end: usize;
         if quote_char == '"' || quote_char == '\'' {
-            start = start + 1;
+            start += 1;
             loop { 
                 if let Some((i,c)) = self.pos.next() {
                     if c == quote_char {
@@ -57,8 +57,8 @@ impl<'a> Iterator for SplitQuoted<'a>
     
 }
 
-pub fn split_quoted<'a>(s: &'a str) -> SplitQuoted {
-    SplitQuoted {s:s, pos: s.char_indices()}
+pub fn split_quoted(s: &str) -> SplitQuoted {
+    SplitQuoted {s, pos: s.char_indices()}
 }
 
 #[test]
