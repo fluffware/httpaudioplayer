@@ -29,8 +29,8 @@ use futures::future::FutureExt;
 use hyper::header;
 use std::panic;
 
-#[macro_use]
 extern crate nom;
+
 
 mod split_quoted;
 use split_quoted::split_quoted;
@@ -56,12 +56,53 @@ macro_rules! print_info {
 
 
 mod parser {
+    extern crate nom;
+    use nom::IResult;
+    use nom::sequence::delimited;
+    use nom::multi::separated_list1;
+    use nom::sequence::separated_pair;
+    use nom::sequence::terminated;
+    use nom::character::complete::char;
+    use nom::bytes::complete::is_not;
+    use nom::bytes::complete::tag;
+    use nom::combinator::eof;
+    use nom::sequence::preceded;
+    use nom::branch::alt;
+    use nom::combinator::map;
+
     #[derive(Debug)]
     pub enum Request<'a>
     {
         Read(Vec<&'a[u8]>),
         Write((&'a [u8],&'a [u8]))
     }
+
+    pub fn quoted(input: &[u8]) -> IResult<&[u8], &[u8]>
+    {
+        delimited(char('"'), is_not("\""), char('"'))(input)
+    }
+    pub fn quoted_list(input: &[u8]) -> IResult<&[u8], Vec<&[u8]>>
+    {
+        separated_list1(char(','),quoted)(input)
+    }
+
+
+    pub fn read(input: &[u8]) -> IResult<&[u8], Vec<&[u8]>>
+    {
+        terminated(preceded(tag("ReadVarNames="), quoted_list),eof)(input)
+    }
+
+    pub fn write(input: &[u8]) -> IResult<&[u8], (&[u8],&[u8])>
+    {
+        separated_pair(preceded(tag("WriteVarName="), quoted),char('&'), preceded(tag("Value="),quoted))(input)
+    }
+    pub fn request(input: &[u8]) -> IResult<&[u8], Request>
+    {
+        alt((map(read, |v| Request::Read(v)), 
+             map(write, |v| Request::Write(v))))(input)
+    }
+
+    /*
     named!(quoted, delimited!(char!('\"'), take_until!("\""), char!('\"')));
     named!(quoted_list <Vec<&[u8]>>, separated_list1!(char!(','),quoted));
     named!(read <Vec<&[u8]>>, terminated!(preceded!(tag!("ReadVarNames="),quoted_list),eof!()));
@@ -70,6 +111,7 @@ mod parser {
                                   preceded!(tag!("Value="),quoted)));
     named!(pub request <Request>, alt!(map!(read, |v| Request::Read(v)) 
                                        | map!(write, |v| Request::Write(v))));
+                                       */
 }
 
 fn request_error<M: Into<Body>>(msg: M) -> Response<Body> {
