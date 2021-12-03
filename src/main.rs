@@ -98,8 +98,8 @@ mod parser {
     }
     pub fn request(input: &[u8]) -> IResult<&[u8], Request>
     {
-        alt((map(read, |v| Request::Read(v)), 
-             map(write, |v| Request::Write(v))))(input)
+        alt((map(read, Request::Read), 
+             map(write, Request::Write)))(input)
     }
 
     /*
@@ -157,7 +157,7 @@ fn write_var(ops:  &mut dyn HttpVarOps, var: &[u8], value: &[u8]) -> Response<Bo
     };
 
     let body =
-        if ops.write_var(&var, &value) {
+        if ops.write_var(&var, value) {
             "00000000\r\n"
         } else {
             "80000105\r\n"
@@ -256,15 +256,15 @@ struct AudioOps {
 impl HttpVarOps for AudioOps
 {
     fn read_var(&mut self, var: &str) ->Option<String> {
-        match self.state.get(var) {
-            Some(&value) => Some((if value {"1"} else {"0"}).to_string()),
-            None => None
-        }
+        self.state.get(var).map(|value| {
+            (if *value {"1"} else {"0"}).to_string()
+        })
     }
+
     fn write_var(&mut self, var: &str, value: &str) ->bool
     {
         
-        match i32::from_str(&value) {
+        match i32::from_str(value) {
             Ok(value) => {
                 let var = var.to_string();
                 let value = value < 0;
@@ -318,20 +318,18 @@ fn read_config(path: &Path) -> std::io::Result<Vec<Config>>
     let mut conf = Vec::<Config>::new();
     let f = File::open(path)?;
     let reader = BufReader::new(f);
-    for line_res in  reader.lines() {
-        if let Ok(line) = line_res {
-            let mut tokens = split_quoted(&line);
-            if let Some(cmd) = tokens.next() {
-                if cmd.starts_with('#') {
-                    // Comment, ignore
-                } else {
-                    let conf_line = 
-                        Config{cmd: cmd.to_string(), 
-                               args: tokens.map(|arg| arg.to_string()).collect::<Vec<String>>()};
-                    conf.push(conf_line);
-                }
-            }   
-        }
+    for line in  reader.lines().flatten() {
+        let mut tokens = split_quoted(&line);
+        if let Some(cmd) = tokens.next() {
+            if cmd.starts_with('#') {
+                // Comment, ignore
+            } else {
+                let conf_line = 
+                    Config{cmd: cmd.to_string(), 
+                           args: tokens.map(|arg| arg.to_string()).collect::<Vec<String>>()};
+                conf.push(conf_line);
+            }
+        }   
     }
     Ok(conf)
 }
