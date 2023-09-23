@@ -1,5 +1,5 @@
 [package]
-edition = "2018"
+edition = "2021"
 name = "httpaudioplayer"
 version = "0.1.0"
 authors = ["ksb <ksb@fluffware.se>"]

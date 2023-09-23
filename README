@@ -7,3 +7,10 @@ The program depends on AudioPort for playback, so it needs to be installed.
 
 The executable takes one optional commandline argument and that's the name of configuration file. If none is given a default filename is used.
 
+The watchdog, if enabled, relies on two predefined variables
+'WatchdogTimer' and 'WatchdogReset'.
+
+'WatchdogTimer' counts down seconds from the value set by the
+'watchdog' command in the configuration file. When it reaches zero,
+the program exits (and should be restarted by external
+means). 'WatchdogReset' sets the counter bck to it's start value.
