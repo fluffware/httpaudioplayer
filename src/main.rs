@@ -29,6 +29,8 @@ use hyper::header;
 use std::panic;
 use std::sync::{Arc, Mutex};
 
+use konst::{primitive::parse_u32, result::unwrap_ctx};
+
 extern crate nom;
 
 mod split_quoted;
@@ -244,10 +246,14 @@ fn play_clip(player: &mut ClipPlayer, clip: &str) {
     }
 }
 
+const SERVER_VERSION: u32 = unwrap_ctx!(parse_u32(env!("CARGO_PKG_VERSION_MAJOR"))) << 24
+    | unwrap_ctx!(parse_u32(env!("CARGO_PKG_VERSION_MINOR"))) << 16
+    | unwrap_ctx!(parse_u32(env!("CARGO_PKG_VERSION_PATCH")));
 impl HttpVarOps for AudioOps {
     fn read_var(&mut self, var: &str) -> Option<String> {
         match var {
             "WatchdogTimer" => Some(self.watchdog_timer.to_string()),
+            "ServerVersion" => Some(SERVER_VERSION.to_string()),
             _ => self
                 .state
                 .get(var)
@@ -330,6 +336,12 @@ async fn main() {
     } else {
         OsStr::new(DEFAULT_CONFIG_FILE).to_os_string()
     };
+
+    print_info!(
+        "Starting HTTP audioplayer version {}",
+        env!("CARGO_PKG_VERSION")
+    );
+
     let conf = match read_config(Path::new(&conf_path_str)) {
         Err(err) => {
             print_err!(
@@ -404,6 +416,7 @@ async fn main() {
             &_ => {}
         }
     }
+
     let mut player = match clip_player::ClipPlayer::new(sample_rate, channels) {
         Ok(s) => s,
         Err(e) => {

@@ -13,4 +13,4 @@ The watchdog, if enabled, relies on two predefined variables
 'WatchdogTimer' counts down seconds from the value set by the
 'watchdog' command in the configuration file. When it reaches zero,
 the program exits (and should be restarted by external
-means). 'WatchdogReset' sets the counter bck to it's start value.
+means). When 'WatchdogReset' is toggled, the counter is set back to it's start value.

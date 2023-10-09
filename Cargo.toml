@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "httpaudioplayer"
-version = "1.1.0"
+version = "1.2.0"
 authors = ["ksb <ksb@fluffware.se>"]
 
 [dependencies]
@@ -12,3 +12,4 @@ triggered = "0.1"
 nom= "7"
 portaudio = "0.7.0"
 hound = "3.4"
+konst = "0.3"
