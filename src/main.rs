@@ -232,15 +232,12 @@ impl AudioOps {
 }
 
 fn play_clip(player: &mut ClipPlayer, clip: &str) {
-    match player.play_clip(&clip) {
+    match player.play_clip(clip) {
         Ok(_) => {}
         Err(e) => {
             print_err!("Failed to play clip {}: {}", clip, e);
-            match player.restart() {
-                Err(e) => {
-                    print_err!("Failed to restart audio: {}", e);
-                }
-                Ok(()) => {}
+            if let Err(e) =  player.restart() {
+                print_err!("Failed to restart audio: {}", e);
             }
         }
     }
@@ -287,14 +284,13 @@ impl HttpVarOps for AudioOps {
     }
 }
 
-const SAMPLE_MAX: f64 = std::i16::MAX as f64;
-const SAMPLE_MIN: f64 = std::i16::MIN as f64;
+const SAMPLE_MAX: f64 = i16::MAX as f64;
+const SAMPLE_MIN: f64 = i16::MIN as f64;
 
 fn adjust_volume(volume: f64, buffer: &mut [i16]) {
     for s in buffer {
         *s = ((*s as f64) * volume)
-            .max(SAMPLE_MIN)
-            .min(SAMPLE_MAX)
+            .clamp(SAMPLE_MIN, SAMPLE_MAX)
             .round() as i16;
     }
 }
@@ -308,7 +304,7 @@ fn read_config(path: &Path) -> std::io::Result<Vec<Config>> {
     let mut conf = Vec::<Config>::new();
     let f = File::open(path)?;
     let reader = BufReader::new(f);
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         let mut tokens = split_quoted(&line);
         if let Some(cmd) = tokens.next() {
             if cmd.starts_with('#') {
